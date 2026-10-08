@@ -1,0 +1,7 @@
+node_modules/
+.DS_Store
+.env
+dist/
+
+# Local-disk media storage (BACKEND.md §8.1, MEDIA_DIR=./uploads) — user uploads, never commit.
+uploads/

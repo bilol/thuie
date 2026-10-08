@@ -1,0 +1,11 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <!-- The INTERNET permission is required for development. Specifically,
+         the Flutter tool needs it to communicate with the running application
+         to allow setting breakpoints, to provide hot reload, etc.
+    -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Allow plain http:// to a LAN dev backend (e.g. http://192.168.1.5:3000).
+         Android 9+ (API 28) blocks cleartext by default; debug builds only. -->
+    <application android:usesCleartextTraffic="true" tools:targetApi="28"/>
+</manifest>

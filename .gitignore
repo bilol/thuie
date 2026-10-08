@@ -1,0 +1,24 @@
+# IDE / editors
+.vscode/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Node dependencies (backend/ and frontend/ also carry their own .gitignore)
+node_modules/
+
+# Docker build & deploy files — kept local, intentionally not committed
+# (host topology, ports, and inline dev secrets live here)
+docker-compose.yml
+docker-compose.prod.yml
+Dockerfile
+.dockerignore
+
+# Root-level build leftovers (the Flutter app builds under mobile/, which has its own rules)
+/build/
+
+thuie-debug.apk

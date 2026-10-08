@@ -1,0 +1,28 @@
+// Barrel: domain models — one entity per file in `models/` (prefer importing a specific entity).
+library;
+export 'models/alumni_profile.dart';
+export 'models/app_notification.dart';
+export 'models/campus_event.dart';
+export 'models/comment.dart';
+export 'models/connection.dart';
+export 'models/conversation.dart';
+export 'models/department.dart';
+export 'models/device_session.dart';
+export 'models/enums.dart';
+export 'models/event_registrant.dart';
+export 'models/faculty_member.dart';
+export 'models/favorite.dart';
+export 'models/feedback.dart';
+export 'models/info_post.dart';
+export 'models/keyword.dart';
+export 'models/media_object.dart';
+export 'models/mentor_profile.dart';
+export 'models/mentorship_application.dart';
+export 'models/moderation_action.dart';
+export 'models/notification_preference.dart';
+export 'models/operation_log.dart';
+export 'models/post.dart';
+export 'models/report.dart';
+export 'models/review_item.dart';
+export 'models/role_strategy.dart';
+export 'models/user.dart';

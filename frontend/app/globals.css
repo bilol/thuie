@@ -1,0 +1,102 @@
+@import "tailwindcss";
+@import "@heroui/styles";
+
+/*
+ * HeroUI v3 is CSS-first: the component theme ships from @heroui/styles and
+ * exposes semantic utilities (bg-background, text-foreground, bg-surface,
+ * bg-accent, text-muted, …) — no tailwind.config.ts / heroui() plugin needed.
+ * The @theme block below keeps the Institutional Editorial type palette
+ * (PROJECT §5.1) for app chrome that is not a HeroUI component.
+ */
+@theme {
+  --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+  /* Tsinghua purple — the single brand token: logo backdrop, h1 headings and,
+     via --accent below, the whole interactive accent system. */
+  --color-brand: #660874;
+}
+
+:root {
+  --radius: 0.375rem; /* 6px — subtle, editorial */
+
+  /* Interactive accent = brand purple: @heroui derives --color-accent, the
+     --accent-hover / --accent-soft fills and --focus rings from --accent, so this
+     one line recolors primary buttons, selection and hover/focus states. Unlayered
+     :root after the @heroui import so it wins over the default theme's blue. */
+  --accent: var(--color-brand);
+}
+
+/*
+ * Radius system — everything derives from the single --radius base via HeroUI's
+ * scale tokens (no one-off px). Components shipped at --radius-3xl / --radius-2xl
+ * read as over-round next to our 6px surfaces, so pull them onto the step that
+ * matches their role: surfaces, overlays & chips → --radius-lg (below); controls
+ * → --radius-field.
+ */
+.badge,
+.card,
+.popover,
+.dropdown__popover,
+.select__popover,
+.modal__dialog,
+.chip {
+  border-radius: var(--radius-lg);
+}
+
+/*
+ * Buttons onto the control step (--radius-field) so toolbars stop reading as a
+ * pill next to a square. In @layer components so a per-button `rounded-full`
+ * utility still wins.
+ */
+@layer components {
+  .button {
+    border-radius: var(--radius-field);
+  }
+}
+
+@layer base {
+  body {
+    @apply bg-background font-sans text-foreground antialiased;
+    font-feature-settings: "cv11", "ss01";
+  }
+
+  /* tabular figures for aligned date/count columns (§5.1 type) */
+  .tnum {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/*
+ * Type scale (PROJECT §5.1) — the app's small, explicit scale. It intentionally
+ * runs smaller than HeroUI's native <Typography> headings (its h1 = text-4xl),
+ * so page/content headings stay on semantic <h_> tags carrying these canonical
+ * roles rather than being forced onto the native sizes:
+ *   Page title ......... PageHeader (h1 · text-2xl→sm:text-[26px] bold, tracking-tight)
+ *   Content title ...... detail h1 (text-2xl font-bold tracking-tight)
+ *   Entity name ........ profile h1 (text-xl font-bold)
+ *   Auth card title .... auth h1 (text-xl font-bold)
+ *   Page section ....... h2 (text-lg font-semibold)
+ *   Card / panel ....... h2 (text-base font-semibold)
+ *   List / item title .. h3 (text-base font-semibold)
+ *   Prose body ......... .prose-body (text-[15px] leading-relaxed)
+ *   Meta / small ....... text-sm · text-xs + text-muted, or <Typography body-sm|body-xs>
+ * Feature-card titles & labels/meta use <Typography> directly (h6 · body-sm · body-xs).
+ */
+
+/* Brand headings — h1 (both <Typography type="h1"> and raw <h1>) carries the
+   brand purple instead of the near-black default — one authoritative branded
+   title per page, so h2 stays foreground (it labels sections and entity names).
+   In @layer components so it beats the base `.typography` default, yet a
+   per-instance text-* utility still wins. */
+@layer components {
+  h1,
+  .typography--h1 {
+    color: var(--color-brand);
+  }
+}
+
+/* Detail-page article body — the one off-grid reading size, centralised so the
+   magic 15px literal is not repeated across the info / event / forum detail pages. */
+@utility prose-body {
+  @apply whitespace-pre-wrap text-[15px] leading-relaxed;
+}

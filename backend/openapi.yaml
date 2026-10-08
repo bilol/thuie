@@ -1,0 +1,521 @@
+openapi: 3.1.0
+info:
+  title: THUIE API
+  version: 1.0.0-draft
+  description: >-
+    REST + WebSocket contract for the THUIE campus alumni info-exchange
+    platform. Design skeleton - mirrors BACKEND.md and the PostgreSQL schema in
+    PROJECT.md 6. Server implementation deferred to the build phase.
+  license: { name: Proprietary }
+servers:
+  - url: https://api.thuie.example.com/api/v1
+    description: Production (placeholder)
+  - url: http://localhost:3000/api/v1
+    description: Local development
+
+# OpenAPI has no native WebSocket binding, so the realtime surface (BACKEND.md §9)
+# is documented here as a vendor extension. Socket.IO server, namespace
+# `/realtime`, authenticated with the same access JWT supplied via handshake
+# `auth.token`, an `Authorization: Bearer` header, or a `?token=` query.
+x-websocket:
+  namespace: /realtime
+  transport: socket.io
+  auth: access JWT (handshake auth.token | Authorization header | ?token= query)
+  rooms: { user: "user:<id>", conversation: "conv:<id>", admin: "role:admin" }
+  client_to_server:
+    - { event: "conversation:join", body: { conversationId: string } }
+    - { event: "conversation:leave", body: { conversationId: string } }
+    - { event: "typing:start", body: { conversationId: string } }
+    - { event: "typing:stop", body: { conversationId: string } }
+  server_to_client:
+    - { event: "message:new", payload: "{ conversationId, message }", room: "conv:<id>" }
+    - { event: "message:read", payload: "{ conversationId, userId, lastReadAt }", room: "conv:<id>" }
+    - { event: "typing:start", payload: "{ conversationId, userId }", room: "conv:<id> (except sender)" }
+    - { event: "typing:stop", payload: "{ conversationId, userId }", room: "conv:<id> (except sender)" }
+    - { event: "notification:new", payload: Notification, room: "user:<id>" }
+    - { event: "moderation:status", payload: "Record<string, unknown>", room: "role:admin" }
+    - { event: "presence:update", payload: "{ userId, isOnline, lastSeenAt }", room: broadcast }
+    - { event: "unauthorized", payload: "{ reason }", note: then hard disconnect }
+
+tags:
+  - { name: Auth }
+  - { name: Users }
+  - { name: Departments }
+  - { name: Infos }
+  - { name: Alumni }
+  - { name: Faculty }
+  - { name: Forum }
+  - { name: Messaging }
+  - { name: Connections }
+  - { name: Events }
+  - { name: Mentorship }
+  - { name: Engagement }
+  - { name: Notifications }
+  - { name: Search }
+  - { name: Feedback }
+  - { name: Media }
+  - { name: Admin }
+  - { name: System }
+
+security:
+  - bearerAuth: []
+
+paths:
+  # ---- Auth ----
+  /auth/login:
+    post: { tags: [Auth], security: [], operationId: login, summary: Authenticate with handle + password,
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/LoginRequest' } } } },
+      responses: { '200': { description: Token pair + user, content: { application/json: { schema: { $ref: '#/components/schemas/TokenPair' } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /auth/refresh:
+    post: { tags: [Auth], security: [], operationId: refreshToken, summary: Rotate refresh token,
+      requestBody: { required: true, content: { application/json: { schema: { type: object, properties: { refresh_token: { type: string } } } } } },
+      responses: { '200': { description: New token pair, content: { application/json: { schema: { $ref: '#/components/schemas/TokenPair' } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /auth/logout:
+    post: { tags: [Auth], operationId: logout, summary: Revoke presented refresh token (or the whole device family),
+      requestBody: { content: { application/json: { schema: { type: object, properties: { refresh_token: { type: string }, all_devices: { type: boolean } } } } } },
+      responses: { '200': { description: Logged out }, default: { $ref: '#/components/responses/Error' } } }
+  /auth/register:
+    post: { tags: [Auth], security: [], operationId: register, summary: Student self-signup,
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ],
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RegisterRequest' } } } },
+      responses: { '201': { description: Created user + tokens, content: { application/json: { schema: { $ref: '#/components/schemas/TokenPair' } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /auth/password:
+    patch: { tags: [Auth], operationId: changePassword, summary: Change password (invalidates older tokens),
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [current_password, new_password], properties: { current_password: { type: string }, new_password: { type: string } } } } } },
+      responses: { '200': { description: Updated }, default: { $ref: '#/components/responses/Error' } } }
+  # ---- Users / me ----
+  /me:
+    get: { tags: [Users], operationId: getMe, summary: Current user, responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } }, default: { $ref: '#/components/responses/Error' } } }
+    patch: { tags: [Users], operationId: updateMe, summary: Update profile fields, requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/UserUpdate' } } } }, responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } }, default: { $ref: '#/components/responses/Error' } } }
+    delete: { tags: [Users], operationId: deleteMe, summary: Soft delete + PII scrub, responses: { '204': { description: deleted }, default: { $ref: '#/components/responses/Error' } } }
+  /me/role-strategy:
+    get: { tags: [Users], operationId: getMyRoleStrategy, summary: Effective permission flags, responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/RoleStrategy' } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /me/push-token:
+    post: { tags: [Users], operationId: registerPushToken, summary: Register FCM push token, requestBody: { content: { application/json: { schema: { type: object, properties: { token: { type: string }, platform: { type: string } } } } } }, responses: { '204': { description: stored }, default: { $ref: '#/components/responses/Error' } } }
+    delete: { tags: [Users], operationId: unregisterPushToken, summary: Unregister a push token, parameters: [ { in: query, name: token, required: true, schema: { type: string } } ], responses: { '204': { description: removed }, default: { $ref: '#/components/responses/Error' } } }
+
+  # ---- Departments ----
+  /departments:
+    get: { tags: [Departments], security: [], operationId: listDepartments, summary: Public department registry, responses: { '200': { description: ok, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Department' } } } } }, default: { $ref: '#/components/responses/Error' } } }
+
+  # ---- Infos ----
+  /infos:
+    get: { tags: [Infos], operationId: listInfos, summary: Info feed (cursor), parameters: [ { $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }, { in: query, name: category, schema: { $ref: '#/components/schemas/InfoCategory' } }, { $ref: '#/components/parameters/Sort' } ], responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/InfoPostPage' } } } }, default: { $ref: '#/components/responses/Error' } } }
+    post: { tags: [Infos], operationId: createInfo, summary: Submit info (-> moderation), parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ], requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/InfoCreate' } } } }, responses: { '201': { description: created, content: { application/json: { schema: { $ref: '#/components/schemas/InfoPost' } } } }, '422': { description: keyword blocked, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /infos/{id}:
+    get: { tags: [Infos], operationId: getInfo, summary: Single info, parameters: [ { $ref: '#/components/parameters/Id' } ], responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/InfoPost' } } } }, '404': { $ref: '#/components/responses/NotFound' }, default: { $ref: '#/components/responses/Error' } } }
+    patch: { tags: [Infos], operationId: updateInfo, summary: Author edit (approved -> re-review), parameters: [ { $ref: '#/components/parameters/Id' } ], requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/InfoCreate' } } } }, responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/InfoPost' } } } }, default: { $ref: '#/components/responses/Error' } } }
+    delete: { tags: [Infos], operationId: deleteInfo, summary: Author takedown, parameters: [ { $ref: '#/components/parameters/Id' } ], responses: { '204': { description: taken down }, default: { $ref: '#/components/responses/Error' } } }
+  /infos/{id}/report:
+    post: { tags: [Infos], operationId: reportInfo, summary: Report an info post, parameters: [ { $ref: '#/components/parameters/Id' } ], requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/ReportCreate' } } } }, responses: { '202': { description: filed }, default: { $ref: '#/components/responses/Error' } } }
+
+  # ---- Alumni ----
+  /alumni:
+    get: { tags: [Alumni], operationId: listAlumni, summary: Browse alumni, parameters: [ { $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }, { in: query, name: department, schema: { type: string } }, { in: query, name: skill, schema: { type: string } }, { in: query, name: q, schema: { type: string } }, { in: query, name: graduation_year, schema: { type: string } }, { in: query, name: company, schema: { type: string } }, { in: query, name: program, schema: { type: string } }, { in: query, name: country, schema: { type: string } } ], responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/AlumniPage' } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /alumni/{id}:
+    get: { tags: [Alumni], operationId: getAlumni, summary: Alumni profile (contact gated), parameters: [ { $ref: '#/components/parameters/Id' } ], responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/AlumniProfile' } } } }, '404': { $ref: '#/components/responses/NotFound' }, default: { $ref: '#/components/responses/Error' } } }
+  /alumni/{id}/connections:
+    get: { tags: [Alumni], operationId: listAlumniConnections, summary: Connections of a profile, parameters: [ { $ref: '#/components/parameters/Id' } ], responses: { '200': { description: ok, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/AlumniProfile' } } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /me/alumni-profile:
+    get: { tags: [Alumni], operationId: getMyAlumniProfile, summary: Own profile incl drafts/rejected, responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/AlumniProfile' } } } }, default: { $ref: '#/components/responses/Error' } } }
+    post: { tags: [Alumni], operationId: createMyAlumniProfile, summary: Create own profile, requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/AlumniUpdate' } } } }, responses: { '201': { description: created, content: { application/json: { schema: { $ref: '#/components/schemas/AlumniProfile' } } } }, default: { $ref: '#/components/responses/Error' } } }
+    patch: { tags: [Alumni], operationId: updateMyAlumniProfile, summary: Edit own profile, requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/AlumniUpdate' } } } }, responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/AlumniProfile' } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /me/alumni-profile/skills:
+    put: { tags: [Alumni], operationId: setMySkills, summary: Replace skill set, requestBody: { content: { application/json: { schema: { type: object, properties: { skills: { type: array, items: { type: string } } } } } } }, responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/AlumniProfile' } } } }, default: { $ref: '#/components/responses/Error' } } }
+
+  # ---- Faculty ----
+  /faculty:
+    get: { tags: [Faculty], operationId: listFaculty, summary: Faculty directory, parameters: [ { $ref: '#/components/parameters/Page' }, { $ref: '#/components/parameters/Limit' }, { in: query, name: department, schema: { type: string } }, { in: query, name: q, schema: { type: string } } ], responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/FacultyPage' } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /faculty/{id}:
+    get: { tags: [Faculty], operationId: getFaculty, summary: Faculty member, parameters: [ { $ref: '#/components/parameters/Id' } ], responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/FacultyMember' } } } }, '404': { $ref: '#/components/responses/NotFound' }, default: { $ref: '#/components/responses/Error' } } }
+
+  # ---- Forum ----
+  /posts:
+    get: { tags: [Forum], operationId: listPosts, summary: Forum feed (cursor), parameters: [ { $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }, { in: query, name: tag, schema: { type: string } }, { in: query, name: q, schema: { type: string } } ], responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/ForumPostPage' } } } }, default: { $ref: '#/components/responses/Error' } } }
+    post: { tags: [Forum], operationId: createPost, summary: Submit post (-> moderation), parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ], requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/PostCreate' } } } }, responses: { '201': { description: created, content: { application/json: { schema: { $ref: '#/components/schemas/ForumPost' } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /posts/{id}:
+    get: { tags: [Forum], operationId: getPost, summary: Post detail (view counted), parameters: [ { $ref: '#/components/parameters/Id' } ], responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/ForumPost' } } } }, '404': { $ref: '#/components/responses/NotFound' }, default: { $ref: '#/components/responses/Error' } } }
+    patch: { tags: [Forum], operationId: updatePost, summary: Author edit, parameters: [ { $ref: '#/components/parameters/Id' } ], requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/PostCreate' } } } }, responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/ForumPost' } } } }, default: { $ref: '#/components/responses/Error' } } }
+    delete: { tags: [Forum], operationId: deletePost, summary: Author takedown, parameters: [ { $ref: '#/components/parameters/Id' } ], responses: { '204': { description: taken down }, default: { $ref: '#/components/responses/Error' } } }
+  /posts/{id}/like:
+    post: { tags: [Forum], operationId: toggleLike, summary: Toggle like, parameters: [ { $ref: '#/components/parameters/Id' } ], responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/ForumPost' } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /posts/{id}/bookmark:
+    post: { tags: [Forum], operationId: toggleBookmark, summary: Toggle bookmark (favorites(post)), parameters: [ { $ref: '#/components/parameters/Id' } ], responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/ForumPost' } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /posts/{id}/comments:
+    get: { tags: [Forum], operationId: listComments, summary: Comment thread, parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' } ], responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/CommentPage' } } } }, default: { $ref: '#/components/responses/Error' } } }
+    post: { tags: [Forum], operationId: createComment, summary: Add comment (keyword-pass -> approved), parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/IdempotencyKey' } ], requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/CommentCreate' } } } }, responses: { '201': { description: created, content: { application/json: { schema: { $ref: '#/components/schemas/Comment' } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /posts/{id}/report:
+    post: { tags: [Forum], operationId: reportPost, summary: Report a post, parameters: [ { $ref: '#/components/parameters/Id' } ], requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/ReportCreate' } } } }, responses: { '201': { description: filed }, default: { $ref: '#/components/responses/Error' } } }
+  /comments/{id}:
+    patch: { tags: [Forum], operationId: updateComment, summary: Edit comment (version-checked), parameters: [ { $ref: '#/components/parameters/Id' } ], requestBody: { content: { application/json: { schema: { type: object, properties: { content: { type: string }, version: { type: integer } } } } } }, responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/Comment' } } } }, '412': { description: version conflict, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }, default: { $ref: '#/components/responses/Error' } } }
+    delete: { tags: [Forum], operationId: deleteComment, summary: Author takedown, parameters: [ { $ref: '#/components/parameters/Id' } ], responses: { '204': { description: taken down }, default: { $ref: '#/components/responses/Error' } } }
+  /comments/{id}/report:
+    post: { tags: [Forum], operationId: reportComment, summary: Report a comment, parameters: [ { $ref: '#/components/parameters/Id' } ], requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/ReportCreate' } } } }, responses: { '201': { description: filed }, default: { $ref: '#/components/responses/Error' } } }
+  /tags:
+    get: { tags: [Forum], operationId: listTags, summary: Tag dictionary, responses: { '200': { description: ok, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Tag' } } } } }, default: { $ref: '#/components/responses/Error' } } }
+
+  # ---- Messaging ----
+  /conversations:
+    get: { tags: [Messaging], operationId: listConversations, summary: Conversations by last_message_at, responses: { '200': { description: ok, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Conversation' } } } } }, default: { $ref: '#/components/responses/Error' } } }
+    post: { tags: [Messaging], operationId: createConversation, summary: Open/find DM (pair_key dedupe) or create group, parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ], requestBody: { content: { application/json: { schema: { type: object, properties: { participant_id: { type: string, description: 'Peer id for a DM. Reuses the existing pair conversation, opening it if absent.' }, participant_ids: { type: array, items: { type: string }, description: 'Creates a group (empty group allowed).' }, title: { type: string }, content: { type: string, maxLength: 5000, description: 'Optional first message, sent atomically into the DM. The web sends this only from the draft composer, so it never opens an empty conversation.' } } } } } }, responses: { '201': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/Conversation' } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /conversations/{id}/messages:
+    get: { tags: [Messaging], operationId: listMessages, summary: Message history (cursor id DESC), parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' } ], responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/MessagePage' } } } }, default: { $ref: '#/components/responses/Error' } } }
+    post: { tags: [Messaging], operationId: sendMessage, summary: Send message (also WS broadcast), parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/IdempotencyKey' } ], requestBody: { content: { application/json: { schema: { type: object, properties: { content: { type: string }, media_id: { type: string } } } } } }, responses: { '201': { description: created, content: { application/json: { schema: { $ref: '#/components/schemas/ChatMessage' } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /conversations/{id}/messages/{messageId}:
+    delete: { tags: [Messaging], operationId: deleteMessage, summary: Delete own message, parameters: [ { $ref: '#/components/parameters/Id' }, { in: path, name: messageId, required: true, schema: { type: string } } ], responses: { '204': { description: deleted }, default: { $ref: '#/components/responses/Error' } } }
+  /conversations/{id}/read:
+    post: { tags: [Messaging], operationId: markConversationRead, summary: Set caller last_read_at, parameters: [ { $ref: '#/components/parameters/Id' } ], requestBody: { content: { application/json: { schema: { type: object, properties: { last_read_at: { type: string, format: date-time } } } } } }, responses: { '201': { description: ok }, default: { $ref: '#/components/responses/Error' } } }
+  /conversations/{id}:
+    patch: { tags: [Messaging], operationId: updateConversation, summary: Mute / pin, parameters: [ { $ref: '#/components/parameters/Id' } ], requestBody: { content: { application/json: { schema: { type: object, properties: { muted: { type: boolean }, pinned: { type: boolean } } } } } }, responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/Conversation' } } } }, default: { $ref: '#/components/responses/Error' } } }
+
+  # ---- Connections ----
+  /connections:
+    get: { tags: [Connections], operationId: listConnections, summary: requests | mine, parameters: [ { in: query, name: box, schema: { type: string, enum: [requests, mine] } } ], responses: { '200': { description: ok, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Connection' } } } } }, default: { $ref: '#/components/responses/Error' } } }
+    post: { tags: [Connections], operationId: createConnection, summary: Send connection request, parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ], requestBody: { content: { application/json: { schema: { type: object, properties: { to_user_id: { type: string }, message: { type: string } } } } } }, responses: { '201': { description: pending, content: { application/json: { schema: { $ref: '#/components/schemas/Connection' } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /connections/{id}:
+    patch: { tags: [Connections], operationId: respondConnection, summary: accept / decline / revoke, parameters: [ { $ref: '#/components/parameters/Id' } ], requestBody: { content: { application/json: { schema: { type: object, properties: { status: { $ref: '#/components/schemas/ConnectionStatus' } } } } } }, responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/Connection' } } } }, default: { $ref: '#/components/responses/Error' } } }
+
+  # ---- Events ----
+  /events:
+    get: { tags: [Events], operationId: listEvents, summary: Published events, parameters: [ { $ref: '#/components/parameters/Page' }, { $ref: '#/components/parameters/Limit' }, { in: query, name: type, schema: { $ref: '#/components/schemas/EventType' } } ], responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/EventPage' } } } }, default: { $ref: '#/components/responses/Error' } } }
+    post: { tags: [Events], operationId: createEvent, summary: Admin create event, requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/EventCreate' } } } }, responses: { '201': { description: created, content: { application/json: { schema: { $ref: '#/components/schemas/CampusEvent' } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /events/{id}:
+    get: { tags: [Events], operationId: getEvent, summary: Event detail, parameters: [ { $ref: '#/components/parameters/Id' } ], responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/CampusEvent' } } } }, '404': { $ref: '#/components/responses/NotFound' }, default: { $ref: '#/components/responses/Error' } } }
+    patch: { tags: [Events], operationId: updateEvent, summary: Admin edit / status, parameters: [ { $ref: '#/components/parameters/Id' } ], requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/EventCreate' } } } }, responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/CampusEvent' } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /events/{id}/register:
+    post: { tags: [Events], operationId: registerEvent, summary: Register (capacity lock), parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/IdempotencyKey' } ], responses: { '201': { description: registered, content: { application/json: { schema: { $ref: '#/components/schemas/EventRegistration' } } } }, '409': { description: capacity reached, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }, default: { $ref: '#/components/responses/Error' } } }
+    delete: { tags: [Events], operationId: cancelRegistration, summary: Cancel own registration, parameters: [ { $ref: '#/components/parameters/Id' } ], responses: { '204': { description: cancelled }, default: { $ref: '#/components/responses/Error' } } }
+  /events/{id}/ticket:
+    get: { tags: [Events], operationId: getEventTicket, summary: Signed single-use ticket, parameters: [ { $ref: '#/components/parameters/Id' } ], responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/Ticket' } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /events/{id}/check-in:
+    post: { tags: [Events], operationId: checkInEvent, summary: Organizer verify scanned ticket, parameters: [ { $ref: '#/components/parameters/Id' } ], requestBody: { content: { application/json: { schema: { type: object, required: [ticket], properties: { ticket: { type: string } } } } } }, responses: { '200': { description: attended, content: { application/json: { schema: { $ref: '#/components/schemas/EventRegistration' } } } }, '409': { description: replay/expired, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }, default: { $ref: '#/components/responses/Error' } } }
+
+  # ---- Mentorship ----
+  /mentors:
+    get: { tags: [Mentorship], operationId: listMentors, summary: Browse mentors (cursor), parameters: [ { in: query, name: area, schema: { type: string } }, { $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' } ], responses: { '200': { description: ok, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/MentorProfile' } } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /me/mentor-profile:
+    post: { tags: [Mentorship], operationId: createMyMentorProfile, summary: Become a mentor, requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/MentorCreate' } } } }, responses: { '201': { description: created, content: { application/json: { schema: { $ref: '#/components/schemas/MentorProfile' } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /mentorship/applications:
+    get: { tags: [Mentorship], operationId: listApplications, summary: List applications (incoming/outgoing, status filter, cursor), parameters: [ { in: query, name: role, schema: { type: string, enum: [incoming, outgoing] } }, { in: query, name: status, schema: { $ref: '#/components/schemas/MentorshipStatus' } }, { $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' } ], responses: { '200': { description: ok, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/MentorshipApplication' } } } } }, default: { $ref: '#/components/responses/Error' } } }
+    post: { tags: [Mentorship], operationId: createApplication, summary: Apply to a mentor, parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ], requestBody: { content: { application/json: { schema: { type: object, properties: { mentor_user_id: { type: string }, message: { type: string } } } } } }, responses: { '201': { description: pending, content: { application/json: { schema: { $ref: '#/components/schemas/MentorshipApplication' } } } }, '409': { description: duplicate active pair, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /mentorship/applications/{id}:
+    patch: { tags: [Mentorship], operationId: respondApplication, summary: Mentor accept / reject, parameters: [ { $ref: '#/components/parameters/Id' } ], requestBody: { content: { application/json: { schema: { type: object, properties: { status: { type: string, enum: [accepted, rejected] } } } } } }, responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/MentorshipApplication' } } } }, '409': { description: mentor full, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }, default: { $ref: '#/components/responses/Error' } } }
+    delete: { tags: [Mentorship], operationId: withdrawApplication, summary: Mentee withdraw / end, parameters: [ { $ref: '#/components/parameters/Id' } ], responses: { '204': { description: ok }, default: { $ref: '#/components/responses/Error' } } }
+
+  # ---- Engagement ----
+  /favorites:
+    get: { tags: [Engagement], operationId: listFavorites, summary: Favorites by type (rows carry the target's title/subtitle), parameters: [ { in: query, name: type, schema: { $ref: '#/components/schemas/FavoriteTargetType' } }, { $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' } ], responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/FavoritePage' } } } }, default: { $ref: '#/components/responses/Error' } } }
+    post: { tags: [Engagement], operationId: addFavorite, summary: Add favorite (idempotent), requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/FavoriteCreate' } } } }, responses: { '201': { description: ok }, default: { $ref: '#/components/responses/Error' } } }
+    delete: { tags: [Engagement], operationId: removeFavorite, summary: "Remove favorite (same triple; /favorites/{type}/{id} alias)", requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/FavoriteCreate' } } } }, responses: { '200': { description: ok }, default: { $ref: '#/components/responses/Error' } } }
+  /favorites/status:
+    get: { tags: [Engagement], operationId: favoriteStatus, summary: Existence probe for one target (paints the save icon), parameters: [ { in: query, name: type, required: true, schema: { $ref: '#/components/schemas/FavoriteTargetType' } }, { in: query, name: id, required: true, schema: { type: string } } ], responses: { '200': { description: ok, content: { application/json: { schema: { type: object, properties: { favorited: { type: boolean } } } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /favorites/{type}/{id}:
+    delete: { tags: [Engagement], operationId: removeFavoriteAlias, summary: Remove favorite (alias), parameters: [ { in: path, name: type, required: true, schema: { $ref: '#/components/schemas/FavoriteTargetType' } }, { in: path, name: id, required: true, schema: { type: string } } ], responses: { '200': { description: ok }, default: { $ref: '#/components/responses/Error' } } }
+
+  # ---- Notifications ----
+  /notifications:
+    get: { tags: [Notifications], operationId: listNotifications, summary: Unread-first feed (cursor), parameters: [ { $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' } ], responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/NotificationPage' } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /notifications/{id}/read:
+    post: { tags: [Notifications], operationId: markNotificationRead, summary: Set read_at, parameters: [ { $ref: '#/components/parameters/Id' } ], responses: { '201': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/Notification' } } } }, '404': { $ref: '#/components/responses/NotFound' }, default: { $ref: '#/components/responses/Error' } } }
+  /notifications/read-all:
+    post: { tags: [Notifications], operationId: markAllRead, summary: Mark all read (single UPDATE), responses: { '201': { description: ok, content: { application/json: { schema: { type: object, properties: { cleared: { type: integer } } } } } }, default: { $ref: '#/components/responses/Error' } } }
+
+  # ---- Search ----
+  /search:
+    get: { tags: [Search], operationId: search, summary: Cross-resource search (FTS/pg_trgm), parameters: [ { in: query, name: q, required: true, schema: { type: string } }, { in: query, name: type, schema: { type: string, enum: [all, info, post, profile, event, faculty] } } ], responses: { '200': { description: ok, content: { application/json: { schema: { type: object, properties: { results: { type: array, items: { type: object, additionalProperties: true } } } } } } }, default: { $ref: '#/components/responses/Error' } } }
+
+  # ---- Feedback ----
+  /feedback:
+    post: { tags: [Feedback], operationId: submitFeedback, summary: Submit feedback, parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ], requestBody: { content: { application/json: { schema: { type: object, properties: { content: { type: string } } } } } }, responses: { '201': { description: open, content: { application/json: { schema: { $ref: '#/components/schemas/Feedback' } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /me/feedback:
+    get: { tags: [Feedback], operationId: listMyFeedback, summary: Own feedback threads, responses: { '200': { description: ok, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Feedback' } } } } }, default: { $ref: '#/components/responses/Error' } } }
+
+  # ---- Media ----
+  /media:
+    post: { tags: [Media], operationId: requestMediaUpload, summary: Create media_object + presigned PUT, requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/MediaRequest' } } } }, responses: { '201': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/MediaUpload' } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /media/{id}:
+    get: { tags: [Media], operationId: getMedia, summary: Media metadata / signed GET, parameters: [ { $ref: '#/components/parameters/Id' } ], responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/MediaObject' } } } }, '404': { $ref: '#/components/responses/NotFound' }, default: { $ref: '#/components/responses/Error' } } }
+
+  /media/{id}/content:
+    put: { tags: [Media], operationId: uploadMediaContent, summary: Upload bytes (local fallback for the presigned PUT), parameters: [ { $ref: '#/components/parameters/Id' } ], requestBody: { required: true, content: { 'application/octet-stream': { schema: { type: string, format: binary } } } }, responses: { '200': { description: stored, content: { application/json: { schema: { $ref: '#/components/schemas/MediaObject' } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /media/{id}/thumb:
+    get: { tags: [Media], security: [], operationId: getMediaThumb, summary: Thumbnail bytes (public, for <img>), parameters: [ { $ref: '#/components/parameters/Id' } ], responses: { '200': { description: image bytes, content: { 'image/*': { schema: { type: string, format: binary } } } }, '404': { $ref: '#/components/responses/NotFound' }, default: { $ref: '#/components/responses/Error' } } }
+  /media/{id}/{name}:
+    get: { tags: [Media], security: [], operationId: getMediaFile, summary: File bytes (public, for <img>), parameters: [ { $ref: '#/components/parameters/Id' }, { in: path, name: name, required: true, schema: { type: string }, description: Ignored slug; the media id selects the object } ], responses: { '200': { description: file bytes, content: { 'application/octet-stream': { schema: { type: string, format: binary } } } }, '404': { $ref: '#/components/responses/NotFound' }, default: { $ref: '#/components/responses/Error' } } }
+
+  # ---- Admin / moderation ----
+  /admin/review:
+    get: { tags: [Admin], operationId: adminReviewQueue, summary: Pending review queue, parameters: [ { $ref: '#/components/parameters/Page' }, { $ref: '#/components/parameters/Limit' }, { in: query, name: type, schema: { $ref: '#/components/schemas/ModerationTargetType' } } ], responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/ReviewPage' } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /admin/review/{type}/{id}/approve:
+    post: { tags: [Admin], operationId: adminApprove, summary: Approve content, parameters: [ { $ref: '#/components/parameters/ModerationTarget' }, { $ref: '#/components/parameters/Id' } ], responses: { '200': { description: approved }, default: { $ref: '#/components/responses/Error' } } }
+  /admin/review/{type}/{id}/reject:
+    post: { tags: [Admin], operationId: adminReject, summary: Reject content (reason -> notification), parameters: [ { $ref: '#/components/parameters/ModerationTarget' }, { $ref: '#/components/parameters/Id' } ], requestBody: { content: { application/json: { schema: { type: object, properties: { reason: { type: string } } } } } }, responses: { '200': { description: rejected }, default: { $ref: '#/components/responses/Error' } } }
+  /admin/takedown:
+    post: { tags: [Admin], operationId: adminTakedown, summary: Take content down, requestBody: { content: { application/json: { schema: { type: object, properties: { target_type: { $ref: '#/components/schemas/ModerationTargetType' }, target_id: { type: string }, reason: { type: string } } } } } }, responses: { '200': { description: taken down }, default: { $ref: '#/components/responses/Error' } } }
+  /admin/reports:
+    get: { tags: [Admin], operationId: adminReports, summary: Reports queue, parameters: [ { $ref: '#/components/parameters/Page' }, { $ref: '#/components/parameters/Limit' }, { in: query, name: status, schema: { $ref: '#/components/schemas/ReportStatus' } } ], responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/ReportPage' } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /admin/reports/{id}/resolve:
+    post: { tags: [Admin], operationId: adminResolveReport, summary: Resolve report, parameters: [ { $ref: '#/components/parameters/Id' } ], requestBody: { content: { application/json: { schema: { type: object, properties: { outcome: { type: string, enum: [ignored, deleted, restricted] }, note: { type: string } } } } } }, responses: { '200': { description: resolved }, default: { $ref: '#/components/responses/Error' } } }
+  /admin/moderation-history/{type}/{id}:
+    get: { tags: [Admin], operationId: adminModerationHistory, summary: moderation_actions timeline, parameters: [ { $ref: '#/components/parameters/ModerationTarget' }, { $ref: '#/components/parameters/Id' } ], responses: { '200': { description: ok, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/ModerationAction' } } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /admin/keywords:
+    get: { tags: [Admin], operationId: adminKeywords, summary: List keywords, responses: { '200': { description: ok, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Keyword' } } } } }, default: { $ref: '#/components/responses/Error' } } }
+    post: { tags: [Admin], operationId: adminCreateKeyword, summary: Create keyword (busts cache), requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/KeywordCreate' } } } }, responses: { '201': { description: created, content: { application/json: { schema: { $ref: '#/components/schemas/Keyword' } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /admin/keywords/{id}:
+    patch: { tags: [Admin], operationId: adminUpdateKeyword, summary: Update keyword, parameters: [ { $ref: '#/components/parameters/Id' } ], requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/KeywordCreate' } } } }, responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/Keyword' } } } }, default: { $ref: '#/components/responses/Error' } } }
+    delete: { tags: [Admin], operationId: adminDeleteKeyword, summary: Delete keyword, parameters: [ { $ref: '#/components/parameters/Id' } ], responses: { '204': { description: deleted }, default: { $ref: '#/components/responses/Error' } } }
+  /admin/users:
+    get: { tags: [Admin], operationId: adminUsers, summary: Search users, parameters: [ { $ref: '#/components/parameters/Page' }, { $ref: '#/components/parameters/Limit' }, { in: query, name: q, schema: { type: string } }, { in: query, name: role, schema: { $ref: '#/components/schemas/Role' } }, { in: query, name: status, schema: { $ref: '#/components/schemas/UserStatus' } }, { in: query, name: program, schema: { type: string } }, { in: query, name: nationality, schema: { type: string } }, { in: query, name: sort, schema: { type: string, enum: [name, program, department, role, status, created_at] } }, { in: query, name: order, schema: { type: string, enum: [asc, desc] } } ], responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/UserPage' } } } }, default: { $ref: '#/components/responses/Error' } } }
+    post: { tags: [Admin], operationId: adminCreateUser, summary: Provision a user (admin-supplied temporary password, starts active), requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/UserCreate' } } } }, responses: { '201': { description: created, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /admin/users/{id}:
+    patch: { tags: [Admin], operationId: adminUpdateUser, summary: Restrict / ban / restore (status only), parameters: [ { $ref: '#/components/parameters/Id' } ], requestBody: { content: { application/json: { schema: { type: object, required: [status], properties: { status: { $ref: '#/components/schemas/UserStatus' } } } } } }, responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } }, default: { $ref: '#/components/responses/Error' } } }
+    put: { tags: [Admin], operationId: adminPutUser, summary: Edit user profile details, parameters: [ { $ref: '#/components/parameters/Id' } ], requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/UserAdminUpdate' } } } }, responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } }, default: { $ref: '#/components/responses/Error' } } }
+    delete: { tags: [Admin], operationId: adminDeleteUser, summary: Delete a user, parameters: [ { $ref: '#/components/parameters/Id' } ], responses: { '204': { description: deleted }, default: { $ref: '#/components/responses/Error' } } }
+  /admin/role-strategies:
+    get: { tags: [Admin], operationId: adminRoleStrategies, summary: List role strategies, responses: { '200': { description: ok, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/RoleStrategy' } } } } }, default: { $ref: '#/components/responses/Error' } } }
+    patch: { tags: [Admin], operationId: adminUpdateRoleStrategy, summary: Update flags (admin_super only), requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/RoleStrategy' } } } }, responses: { '200': { description: ok }, default: { $ref: '#/components/responses/Error' } } }
+  /admin/faculty:
+    get: { tags: [Admin], operationId: adminListFaculty, summary: Faculty admin table (offset + q/sort/order), parameters: [ { $ref: '#/components/parameters/Page' }, { $ref: '#/components/parameters/Limit' }, { in: query, name: q, schema: { type: string } }, { in: query, name: sort, schema: { type: string, enum: [name, title] } }, { in: query, name: order, schema: { type: string, enum: [asc, desc] } } ], responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/FacultyPage' } } } }, default: { $ref: '#/components/responses/Error' } } }
+    post: { tags: [Admin], operationId: adminCreateFaculty, summary: Create faculty member, requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/FacultyInput' } } } }, responses: { '201': { description: created, content: { application/json: { schema: { $ref: '#/components/schemas/FacultyMember' } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /admin/faculty/{id}:
+    patch: { tags: [Admin], operationId: adminUpdateFaculty, summary: Edit faculty member, parameters: [ { $ref: '#/components/parameters/Id' } ], requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/FacultyInput' } } } }, responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/FacultyMember' } } } }, default: { $ref: '#/components/responses/Error' } } }
+    delete: { tags: [Admin], operationId: adminDeleteFaculty, summary: Delete faculty member, parameters: [ { $ref: '#/components/parameters/Id' } ], responses: { '204': { description: deleted }, default: { $ref: '#/components/responses/Error' } } }
+  /admin/feedback:
+    get: { tags: [Admin], operationId: adminFeedbackQueue, summary: Feedback triage queue, parameters: [ { $ref: '#/components/parameters/Page' }, { $ref: '#/components/parameters/Limit' }, { in: query, name: status, schema: { type: string, enum: [open, answered, closed] } } ], responses: { '200': { description: ok, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Feedback' } } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /admin/feedback/{id}:
+    patch: { tags: [Admin], operationId: adminReplyFeedback, summary: Reply to / transition a feedback thread, parameters: [ { $ref: '#/components/parameters/Id' } ], requestBody: { content: { application/json: { schema: { type: object, properties: { reply: { type: string, maxLength: 2000 }, status: { type: string, enum: [open, answered, closed] } } } } } }, responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/Feedback' } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /admin/operation-logs:
+    get: { tags: [Admin], operationId: adminOperationLogs, summary: Admin audit log, parameters: [ { $ref: '#/components/parameters/Page' }, { $ref: '#/components/parameters/Limit' } ], responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/OperationLogPage' } } } }, default: { $ref: '#/components/responses/Error' } } }
+    delete: { tags: [Admin], operationId: adminClearOperationLogs, summary: Clear the audit log, responses: { '204': { description: cleared }, default: { $ref: '#/components/responses/Error' } } }
+
+  # ---- Auth: reset / verify ----
+  /auth/forgot-password:
+    post: { tags: [Auth], security: [], operationId: forgotPassword, summary: Send password-reset OTP/link,
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ForgotPasswordRequest' } } } },
+      responses: { '202': { description: accepted (always) }, default: { $ref: '#/components/responses/Error' } } }
+  /auth/reset-password:
+    post: { tags: [Auth], security: [], operationId: resetPassword, summary: Redeem reset code (revokes all sessions),
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ResetPasswordRequest' } } } },
+      responses: { '200': { description: reset done }, default: { $ref: '#/components/responses/Error' } } }
+  /auth/verify:
+    post: { tags: [Auth], security: [], operationId: verifyOtp, summary: Confirm an OTP,
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/OtpVerifyRequest' } } } },
+      responses: { '200': { description: verified, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /auth/resend:
+    post: { tags: [Auth], security: [], operationId: resendOtp, summary: Re-issue an OTP,
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [identifier, purpose], properties: { identifier: { type: string }, purpose: { $ref: '#/components/schemas/OtpPurpose' } } } } } },
+      responses: { '200': { description: sent }, default: { $ref: '#/components/responses/Error' } } }
+  /auth/otp:
+    post: { tags: [Auth], security: [], operationId: issueOtp, summary: Issue/refresh an OTP for an identifier (query form, convenience for the client's send-code-first step),
+      parameters: [ { in: query, name: identifier, required: true, schema: { type: string } }, { in: query, name: purpose, schema: { $ref: '#/components/schemas/OtpPurpose' } } ],
+      responses: { '200': { description: sent }, default: { $ref: '#/components/responses/Error' } } }
+
+  # ---- Users: sessions / my content / blocks / prefs ----
+  /me/sessions:
+    get: { tags: [Users], operationId: listSessions, summary: Active device sessions, responses: { '200': { description: ok, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Session' } } } } }, default: { $ref: '#/components/responses/Error' } } }
+    delete: { tags: [Users], operationId: revokeAllSessions, summary: Revoke all other sessions, responses: { '204': { description: revoked }, default: { $ref: '#/components/responses/Error' } } }
+  /me/sessions/{id}:
+    delete: { tags: [Users], operationId: revokeSession, summary: Revoke one session, parameters: [ { $ref: '#/components/parameters/Id' } ], responses: { '204': { description: revoked }, default: { $ref: '#/components/responses/Error' } } }
+  /me/infos:
+    get: { tags: [Infos], operationId: listMyInfos, summary: Own infos (all statuses + history), parameters: [ { $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' } ], responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/InfoPostPage' } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /me/posts:
+    get: { tags: [Forum], operationId: listMyPosts, summary: Own posts (all statuses), parameters: [ { $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' } ], responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/ForumPostPage' } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /me/comments:
+    get: { tags: [Forum], operationId: listMyComments, summary: Own comments, parameters: [ { $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' } ], responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/CommentPage' } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /me/blocks:
+    get: { tags: [Connections], operationId: listBlocks, summary: Blocked users, responses: { '200': { description: ok, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Block' } } } } }, default: { $ref: '#/components/responses/Error' } } }
+    post: { tags: [Connections], operationId: blockUser, summary: Block a user, requestBody: { content: { application/json: { schema: { type: object, properties: { user_id: { type: string } } } } } }, responses: { '201': { description: blocked }, default: { $ref: '#/components/responses/Error' } } }
+  /me/blocks/{userId}:
+    delete: { tags: [Connections], operationId: unblockUser, summary: Unblock, parameters: [ { $ref: '#/components/parameters/UserId' } ], responses: { '204': { description: unblocked }, default: { $ref: '#/components/responses/Error' } } }
+  /me/notification-preferences:
+    get: { tags: [Notifications], operationId: getNotificationPrefs, summary: Per-type mute, responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/NotificationPreferences' } } } }, default: { $ref: '#/components/responses/Error' } } }
+    patch: { tags: [Notifications], operationId: updateNotificationPrefs, summary: Mute / unmute one notification type, requestBody: { content: { application/json: { schema: { type: object, required: [type, muted], properties: { type: { $ref: '#/components/schemas/NotificationType' }, muted: { type: boolean } } } } } }, responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/NotificationPreferences' } } } }, default: { $ref: '#/components/responses/Error' } } }
+
+  # ---- Alumni visibility request ----
+  /me/alumni-profile/visibility-request:
+    post: { tags: [Alumni], operationId: requestVisibilityChange, summary: Ask admin to change visibility, requestBody: { content: { application/json: { schema: { type: object, properties: { visibility: { $ref: '#/components/schemas/Visibility' }, note: { type: string } } } } } }, responses: { '202': { description: submitted for admin review }, default: { $ref: '#/components/responses/Error' } } }
+
+  # ---- Reports (generic) ----
+  /reports:
+    post: { tags: [Engagement], operationId: createReport, summary: File a report (any target), parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ], requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReportCreateGeneric' } } } }, responses: { '202': { description: filed }, default: { $ref: '#/components/responses/Error' } } }
+  /me/reports:
+    get: { tags: [Engagement], operationId: listMyReports, summary: Filed reports + resolution, parameters: [ { $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' } ], responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/ReportPage' } } } }, default: { $ref: '#/components/responses/Error' } } }
+
+  # ---- Messaging group participants ----
+  /conversations/{id}/participants:
+    post: { tags: [Messaging], operationId: addParticipants, summary: Group add members, parameters: [ { $ref: '#/components/parameters/Id' } ], requestBody: { content: { application/json: { schema: { type: object, properties: { user_ids: { type: array, items: { type: string } } } } } } }, responses: { '200': { description: ok }, default: { $ref: '#/components/responses/Error' } } }
+  /conversations/{id}/participants/{userId}:
+    delete: { tags: [Messaging], operationId: removeParticipant, summary: Group remove member, parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/UserId' } ], responses: { '204': { description: removed }, default: { $ref: '#/components/responses/Error' } } }
+  /conversations/{id}/leave:
+    post: { tags: [Messaging], operationId: leaveConversation, summary: Leave conversation, parameters: [ { $ref: '#/components/parameters/Id' } ], responses: { '204': { description: left }, default: { $ref: '#/components/responses/Error' } } }
+
+  # ---- Events my registrations ----
+  /me/event-registrations:
+    get: { tags: [Events], operationId: listMyRegistrations, summary: My registrations + tickets, parameters: [ { in: query, name: upcoming, schema: { type: boolean } } ], responses: { '200': { description: ok, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/EventRegistration' } } } } }, default: { $ref: '#/components/responses/Error' } } }
+
+  # ---- Search suggest ----
+  /search/suggest:
+    get: { tags: [Search], operationId: searchSuggest, summary: Autocomplete, parameters: [ { in: query, name: q, required: true, schema: { type: string } }, { in: query, name: scope, schema: { type: string, enum: [tags, skills, departments, users, all] } } ], responses: { '200': { description: ok, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Suggestion' } } } } }, default: { $ref: '#/components/responses/Error' } } }
+
+  # ---- Admin convert / stats ----
+  /admin/users/{id}/convert:
+    post: { tags: [Admin], operationId: adminConvertUser, summary: student -> graduate conversion, parameters: [ { $ref: '#/components/parameters/Id' } ], requestBody: { content: { application/json: { schema: { type: object, properties: { graduation_year: { type: string }, force: { type: boolean } } } } } }, responses: { '200': { description: converted, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } }, default: { $ref: '#/components/responses/Error' } } }
+  /admin/users/convert:
+    post: { tags: [Admin], operationId: adminConvertUsersBatch, summary: Batch conversion, requestBody: { content: { application/json: { schema: { type: object, properties: { items: { type: array, items: { type: object, properties: { user_id: { type: string }, graduation_year: { type: string } } } } } } } } }, responses: { '200': { description: done }, default: { $ref: '#/components/responses/Error' } } }
+  /admin/stats:
+    get: { tags: [Admin], operationId: adminStats, summary: Dashboard stats, responses: { '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/Stats' } } } }, default: { $ref: '#/components/responses/Error' } } }
+
+  # ---- Ops ----
+  /healthz:
+    get: { tags: [System], security: [], operationId: healthz, summary: Liveness, responses: { '200': { description: alive } } }
+  /ready:
+    get: { tags: [System], security: [], operationId: readiness, summary: Readiness (deps checked), responses: { '200': { description: ready }, '503': { description: not ready } } }
+
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
+
+  parameters:
+    ModerationTarget: { in: path, name: type, required: true, schema: { $ref: '#/components/schemas/ModerationTargetType' } }
+    Limit: { in: query, name: limit, schema: { type: integer, minimum: 1, maximum: 50, default: 20 } }
+    Id: { in: path, name: id, required: true, schema: { type: string } }
+    UserId: { in: path, name: userId, required: true, schema: { type: string } }
+    Page: { in: query, name: page, schema: { type: integer, minimum: 1, default: 1 } }
+    Cursor: { in: query, name: cursor, schema: { type: string }, description: Opaque keyset cursor }
+    Sort: { in: query, name: sort, schema: { type: string }, description: "-created_at (leading - = DESC)" }
+    IdempotencyKey: { in: header, name: Idempotency-Key, schema: { type: string, format: uuid } }
+
+  responses:
+    Error:
+      description: Error
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    NotFound:
+      description: Not found (or hidden by visibility)
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+
+  schemas:
+    # ---- enums (wire = DB snake_case) ----
+    Role: { type: string, enum: [student, graduate, admin, admin_super] }
+    UserStatus: { type: string, enum: [unverified, active, posting_restricted, banned, deleted] }
+    OtpPurpose: { type: string, enum: [register_verify, password_reset] }
+    ContentStatus: { type: string, enum: [pending, approved, rejected, taken_down] }
+    ProfileStatus: { type: string, enum: [draft, pending, approved, rejected] }
+    Visibility: { type: string, enum: [student_only, all, admin_only] }
+    InfoCategory: { type: string, enum: [internal, open, recruitment] }
+    InfoSource: { type: string, enum: [official, user] }
+    ProfileSource: { type: string, enum: [school, user] }
+    EventType: { type: string, enum: [recruitment, lecture, sharing, ceremony, sports, other] }
+    ConnectionStatus: { type: string, enum: [pending, accepted, declined, revoked] }
+    KeywordAction: { type: string, enum: [block, manual_review] }
+    MentorshipStatus: { type: string, enum: [pending, accepted, rejected, withdrawn, ended] }
+    ReportStatus: { type: string, enum: [open, resolved_ignored, resolved_deleted, resolved_restricted] }
+    NotificationType: { type: string, enum: [review_result, comment_reply, connection, system, report_result, identity_change, broadcast] }
+    FavoriteTargetType: { type: string, enum: [info, profile, post, comment] }
+    ModerationTargetType: { type: string, enum: [info_post, forum_post, comment, alumni_profile] }
+    ReportTargetType: { type: string, enum: [info_post, forum_post, comment, alumni_profile, user] }
+
+    # ---- shared ----
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string, description: Stable machine code }
+        message: { type: string }
+        details: { type: object, additionalProperties: true }
+        requestId: { type: string }
+        errors: { type: array, items: { type: object, properties: { field: { type: string }, message: { type: string } } } }
+    CursorMeta: { type: object, properties: { nextCursor: { type: [string, 'null'] }, limit: { type: integer } } }
+    OffsetMeta: { type: object, properties: { page: { type: integer }, limit: { type: integer }, total: { type: integer }, totalPages: { type: integer } } }
+
+    # ---- auth ----
+    LoginRequest: { type: object, required: [handle, password], properties: { handle: { type: string, description: student_id / phone / email }, password: { type: string }, device_label: { type: string } } }
+    RegisterRequest: { type: object, required: [name, role, password], properties: { name: { type: string }, role: { type: string, enum: [student, graduate] }, student_id: { type: string }, phone: { type: string }, email: { type: string }, password: { type: string }, department: { type: string, description: department code or id }, grade_year: { type: string }, otp_code: { type: string }, invite_code: { type: string } } }
+    TokenPair: { type: object, properties: { access_token: { type: string }, refresh_token: { type: string }, expires_in: { type: integer }, user: { $ref: '#/components/schemas/User' } } }
+
+    # ---- entities ----
+    Department: { type: object, properties: { id: { type: string }, code: { type: string }, name_zh: { type: string }, name_en: { type: string }, faculty: { type: [string, 'null'] } } }
+    User: { type: object, properties: { id: { type: string }, name: { type: string }, role: { $ref: '#/components/schemas/Role' }, status: { $ref: '#/components/schemas/UserStatus' }, student_id: { type: [string, 'null'] }, phone: { type: [string, 'null'] }, email: { type: [string, 'null'] }, department: { $ref: '#/components/schemas/Department' }, grade_year: { type: [string, 'null'] }, graduation_year: { type: [string, 'null'] }, avatar_url: { type: [string, 'null'] }, bio: { type: [string, 'null'] }, wechat: { type: [string, 'null'], description: GET /me only }, whatsapp: { type: [string, 'null'], description: GET /me only }, linkedin: { type: [string, 'null'], description: GET /me only }, wechat_visibility: { $ref: '#/components/schemas/Visibility' }, whatsapp_visibility: { $ref: '#/components/schemas/Visibility' }, linkedin_visibility: { $ref: '#/components/schemas/Visibility' }, email_visibility: { $ref: '#/components/schemas/Visibility' }, phone_visibility: { $ref: '#/components/schemas/Visibility' }, is_online: { type: boolean }, created_at: { type: string, format: date-time } } }
+    UserUpdate: { type: object, properties: { name: { type: string }, bio: { type: string }, avatar_media_id: { type: string }, grade_year: { type: string }, wechat: { type: string }, whatsapp: { type: string }, linkedin: { type: string }, wechat_visibility: { $ref: '#/components/schemas/Visibility' }, whatsapp_visibility: { $ref: '#/components/schemas/Visibility' }, linkedin_visibility: { $ref: '#/components/schemas/Visibility' }, email_visibility: { $ref: '#/components/schemas/Visibility' }, phone_visibility: { $ref: '#/components/schemas/Visibility' } } }
+    UserCreate: { type: object, required: [name, role, password], properties: { name: { type: string }, role: { $ref: '#/components/schemas/Role' }, password: { type: string, description: admin-supplied temporary password }, student_id: { type: string }, email: { type: string }, phone: { type: string }, department_id: { type: string }, program: { type: string }, nationality: { type: string }, grade_year: { type: string }, graduation_year: { type: string } } }
+    UserAdminUpdate: { type: object, properties: { name: { type: string }, email: { type: [string, 'null'] }, phone: { type: [string, 'null'] }, student_id: { type: [string, 'null'] }, department_id: { type: [string, 'null'] }, program: { type: [string, 'null'] }, nationality: { type: [string, 'null'] }, grade_year: { type: [string, 'null'] }, graduation_year: { type: [string, 'null'] }, role: { $ref: '#/components/schemas/Role' } } }
+    RoleStrategy: { type: object, properties: { role: { $ref: '#/components/schemas/Role' }, can_view_info: { type: boolean }, can_view_internal: { type: boolean }, can_view_alumni: { type: boolean }, can_view_forum: { type: boolean }, can_submit_info: { type: boolean }, can_post_forum: { type: boolean }, can_comment: { type: boolean }, can_create_profile: { type: boolean } } }
+
+    MediaObject: { type: object, properties: { id: { type: string }, kind: { type: string, enum: [image, attachment, avatar] }, url: { type: string }, file_name: { type: string }, mime_type: { type: string }, size_bytes: { type: integer }, width: { type: [integer, 'null'] }, height: { type: [integer, 'null'] }, thumbnail_key: { type: [string, 'null'] } } }
+    MediaRequest: { type: object, required: [kind, file_name, mime_type, size_bytes], properties: { kind: { type: string, enum: [image, attachment, avatar] }, file_name: { type: string }, mime_type: { type: string }, size_bytes: { type: integer }, sha256: { type: string } } }
+    MediaUpload: { type: object, properties: { media_id: { type: string }, upload_url: { type: string }, expires_at: { type: string, format: date-time } } }
+
+    InfoPost: { type: object, properties: { id: { type: string }, title: { type: string }, content: { type: string }, category: { $ref: '#/components/schemas/InfoCategory' }, source: { $ref: '#/components/schemas/InfoSource' }, visibility: { $ref: '#/components/schemas/Visibility' }, status: { $ref: '#/components/schemas/ContentStatus' }, pinned: { type: boolean }, version: { type: integer }, author: { $ref: '#/components/schemas/User' }, media: { type: array, items: { $ref: '#/components/schemas/MediaObject' } }, created_at: { type: string, format: date-time }, edited_at: { type: [string, 'null'], format: date-time } } }
+    InfoCreate: { type: object, required: [title, content], properties: { title: { type: string, maxLength: 200 }, content: { type: string }, category: { $ref: '#/components/schemas/InfoCategory' }, visibility: { $ref: '#/components/schemas/Visibility' }, media_ids: { type: array, items: { type: string } } } }
+
+    AlumniProfile: { type: object, properties: { id: { type: string }, display_name: { type: string }, department: { $ref: '#/components/schemas/Department' }, graduation_year: { type: [string, 'null'] }, program: { type: [string, 'null'] }, industry: { type: [string, 'null'] }, country: { type: [string, 'null'] }, city: { type: [string, 'null'] }, work_title: { type: [string, 'null'] }, company: { type: [string, 'null'] }, bio: { type: [string, 'null'] }, skills: { type: array, items: { type: string } }, source: { $ref: '#/components/schemas/ProfileSource' }, status: { $ref: '#/components/schemas/ProfileStatus' }, visibility: { $ref: '#/components/schemas/Visibility' }, email: { type: [string, 'null'], description: omitted unless the owner account's email_visibility + role allowed }, phone: { type: [string, 'null'], description: omitted unless the owner account's phone_visibility + role allowed }, wechat: { type: [string, 'null'], description: omitted unless the owner account's wechat_visibility + role allowed }, whatsapp: { type: [string, 'null'], description: omitted unless the owner account's whatsapp_visibility + role allowed }, linkedin: { type: [string, 'null'], description: omitted unless the owner account's linkedin_visibility + role allowed }, completion_percent: { type: integer }, version: { type: integer }, avatar_url: { type: [string, 'null'] } } }
+    AlumniUpdate: { type: object, properties: { display_name: { type: string }, department_id: { type: string }, graduation_year: { type: string }, program: { type: string }, industry: { type: string }, country: { type: string }, city: { type: string }, work_title: { type: string }, company: { type: string }, bio: { type: string }, visibility: { $ref: '#/components/schemas/Visibility' } } }
+
+    FacultyMember: { type: object, properties: { id: { type: string }, name: { type: string }, department: { $ref: '#/components/schemas/Department' }, title: { type: string }, research_area: { type: string }, email: { type: [string, 'null'] }, phone: { type: [string, 'null'] }, bio: { type: [string, 'null'] }, avatar_url: { type: [string, 'null'] } } }
+    FacultyInput: { type: object, required: [name], properties: { name: { type: string, maxLength: 100 }, department: { type: string, description: department code or id }, title: { type: string, maxLength: 120 }, research_area: { type: string, maxLength: 240 }, email: { type: string }, phone: { type: string, maxLength: 40 }, bio: { type: string, maxLength: 2000 }, avatar_media_id: { type: string }, avatar_url: { type: string }, address: { type: string, maxLength: 240 }, homepage: { type: string, maxLength: 500 } } }
+
+    Tag: { type: object, properties: { id: { type: string }, name: { type: string }, slug: { type: string } } }
+    ForumPost: { type: object, properties: { id: { type: string }, title: { type: string }, content: { type: string }, author: { $ref: '#/components/schemas/User' }, status: { $ref: '#/components/schemas/ContentStatus' }, location: { type: [string, 'null'] }, is_pinned: { type: boolean }, tags: { type: array, items: { $ref: '#/components/schemas/Tag' } }, view_count: { type: integer }, like_count: { type: integer }, bookmark_count: { type: integer }, comment_count: { type: integer }, liked: { type: boolean }, bookmarked: { type: boolean }, liked_by: { type: array, maxItems: 3, items: { $ref: '#/components/schemas/User' } }, version: { type: integer }, created_at: { type: string, format: date-time }, last_comment_at: { type: [string, 'null'], format: date-time } } }
+    PostCreate: { type: object, required: [title, content], properties: { title: { type: string }, content: { type: string }, location: { type: string }, tags: { type: array, items: { type: string } } } }
+    Comment: { type: object, properties: { id: { type: string }, forum_post_id: { type: string }, parent_id: { type: [string, 'null'] }, author: { $ref: '#/components/schemas/User' }, content: { type: string }, status: { $ref: '#/components/schemas/ContentStatus' }, version: { type: integer }, created_at: { type: string, format: date-time } } }
+    CommentCreate: { type: object, required: [content], properties: { content: { type: string }, parent_id: { type: [string, 'null'] } } }
+
+    Conversation: { type: object, properties: { id: { type: string }, kind: { type: string, enum: [direct, group] }, participants: { type: array, items: { $ref: '#/components/schemas/User' } }, last_message_at: { type: [string, 'null'], format: date-time }, muted: { type: boolean }, pinned: { type: boolean }, unread_count: { type: integer } } }
+    ChatMessage: { type: object, properties: { id: { type: string }, conversation_id: { type: string }, sender: { $ref: '#/components/schemas/User' }, content: { type: string }, media: { oneOf: [ { $ref: '#/components/schemas/MediaObject' }, { type: 'null' } ] }, sent_at: { type: string, format: date-time }, edited_at: { type: [string, 'null'], format: date-time } } }
+
+    Connection: { type: object, properties: { id: { type: string }, from_user: { $ref: '#/components/schemas/User' }, to_user: { $ref: '#/components/schemas/User' }, status: { $ref: '#/components/schemas/ConnectionStatus' }, message: { type: [string, 'null'] }, responded_at: { type: [string, 'null'], format: date-time }, created_at: { type: string, format: date-time } } }
+
+    CampusEvent: { type: object, properties: { id: { type: string }, title: { type: string }, description: { type: string }, starts_at: { type: string, format: date-time }, ends_at: { type: [string, 'null'], format: date-time }, location: { type: string }, organizer: { type: string }, type: { $ref: '#/components/schemas/EventType' }, capacity: { type: integer }, registered_count: { type: integer }, status: { type: string, enum: [draft, published, cancelled, archived] }, cover: { oneOf: [ { $ref: '#/components/schemas/MediaObject' }, { type: 'null' } ] } } }
+    EventCreate: { type: object, required: [title, starts_at], properties: { title: { type: string }, description: { type: string }, starts_at: { type: string, format: date-time }, ends_at: { type: string, format: date-time }, location: { type: string }, organizer: { type: string }, type: { $ref: '#/components/schemas/EventType' }, capacity: { type: integer, minimum: 0 }, status: { type: string, enum: [draft, published, cancelled, archived] }, cover_media_id: { type: string } } }
+    EventRegistration: { type: object, properties: { event_id: { type: string }, user_id: { type: string }, registered_at: { type: string, format: date-time }, status: { type: string, enum: [registered, attended, cancelled] } } }
+    Ticket: { type: object, properties: { token: { type: string, description: Signed, short-lived, single-use }, expires_at: { type: string, format: date-time } } }
+
+    MentorProfile: { type: object, properties: { user: { $ref: '#/components/schemas/User' }, expertise: { type: string }, mentor_area: { type: string }, max_mentees: { type: integer }, current_mentees: { type: integer }, status: { type: string, enum: [pending, active, paused] } } }
+    MentorCreate: { type: object, properties: { expertise: { type: string }, mentor_area: { type: string }, max_mentees: { type: integer, default: 3 } } }
+    MentorshipApplication: { type: object, properties: { id: { type: string }, mentor: { $ref: '#/components/schemas/User' }, mentee: { $ref: '#/components/schemas/User' }, message: { type: string }, status: { $ref: '#/components/schemas/MentorshipStatus' }, responded_at: { type: [string, 'null'], format: date-time } } }
+
+    # title/subtitle name the polymorphic target; they are absent (not null) once
+    # the §2 null-drop runs, i.e. when the saved row no longer resolves to
+    # readable content — the client then shows "no longer available".
+    Favorite: { type: object, properties: { target_type: { $ref: '#/components/schemas/FavoriteTargetType' }, target_id: { type: string }, created_at: { type: string, format: date-time }, title: { type: [string, 'null'] }, subtitle: { type: [string, 'null'] } } }
+    FavoriteCreate: { type: object, required: [target_type, target_id], properties: { target_type: { $ref: '#/components/schemas/FavoriteTargetType' }, target_id: { type: string } } }
+
+    Notification: { type: object, properties: { id: { type: string }, type: { $ref: '#/components/schemas/NotificationType' }, title: { type: string }, body: { type: string }, payload: { type: object, properties: { route: { type: string }, targetType: { type: string }, targetId: { type: string } } }, read_at: { type: [string, 'null'], format: date-time }, created_at: { type: string, format: date-time } } }
+
+    Feedback: { type: object, properties: { id: { type: string }, content: { type: string }, reply: { type: [string, 'null'] }, status: { type: string, enum: [open, answered, closed] }, created_at: { type: string, format: date-time } } }
+
+    Keyword: { type: object, properties: { id: { type: string }, word: { type: string }, action: { $ref: '#/components/schemas/KeywordAction' }, enabled: { type: boolean } } }
+    KeywordCreate: { type: object, required: [word, action], properties: { word: { type: string, maxLength: 100 }, action: { $ref: '#/components/schemas/KeywordAction' }, enabled: { type: boolean, default: true } } }
+    Report: { type: object, properties: { id: { type: string }, reporter: { $ref: '#/components/schemas/User' }, target_type: { $ref: '#/components/schemas/ReportTargetType' }, target_id: { type: string }, reason: { type: string }, status: { $ref: '#/components/schemas/ReportStatus' }, result_note: { type: [string, 'null'] }, created_at: { type: string, format: date-time } } }
+    ReportCreate: { type: object, required: [reason], properties: { reason: { type: string, maxLength: 500 } } }
+    ModerationAction: { type: object, properties: { id: { type: string }, target_type: { $ref: '#/components/schemas/ModerationTargetType' }, target_id: { type: string }, actor: { oneOf: [ { $ref: '#/components/schemas/User' }, { type: 'null' } ], description: null = keyword engine / system }, action: { type: string, enum: [submitted, approved, rejected, taken_down, removed, resubmitted] }, reason: { type: [string, 'null'] }, created_at: { type: string, format: date-time } } }
+    OperationLog: { type: object, properties: { id: { type: string }, admin: { $ref: '#/components/schemas/User' }, action: { type: string }, target_type: { type: [string, 'null'] }, target_id: { type: [string, 'null'] }, detail: { type: object, additionalProperties: true }, ip: { type: [string, 'null'] }, created_at: { type: string, format: date-time } } }
+    ReviewQueueItem: { type: object, properties: { target_type: { $ref: '#/components/schemas/ModerationTargetType' }, target_id: { type: string }, title: { type: string }, submitted_at: { type: string, format: date-time }, author: { $ref: '#/components/schemas/User' } } }
+
+    # ---- auth: otp / reset ----
+    ForgotPasswordRequest: { type: object, required: [identifier], properties: { identifier: { type: string } } }
+    ResetPasswordRequest: { type: object, required: [identifier, code, new_password], properties: { identifier: { type: string }, code: { type: string }, new_password: { type: string } } }
+    OtpVerifyRequest: { type: object, required: [identifier, purpose, code], properties: { identifier: { type: string, description: the phone/email that received the code }, purpose: { $ref: '#/components/schemas/OtpPurpose' }, code: { type: string } } }
+
+    # ---- sessions / blocks / prefs / stats ----
+    Session: { type: object, properties: { id: { type: string }, device_label: { type: [string, 'null'] }, ip: { type: [string, 'null'] }, current: { type: boolean }, created_at: { type: string, format: date-time }, last_used_at: { type: [string, 'null'], format: date-time } } }
+    Block: { type: object, properties: { blocked_id: { type: string }, user: { $ref: '#/components/schemas/User' }, created_at: { type: string, format: date-time } } }
+    NotificationPreferences: { type: object, properties: { preferences: { type: array, items: { type: object, properties: { type: { $ref: '#/components/schemas/NotificationType' }, muted: { type: boolean } } } } } }
+    ReportCreateGeneric: { type: object, required: [target_type, target_id, reason], properties: { target_type: { $ref: '#/components/schemas/ReportTargetType' }, target_id: { type: string }, reason: { type: string, maxLength: 500 } } }
+    Suggestion: { type: object, properties: { type: { type: string, enum: [tag, skill, department, user] }, label: { type: string }, value: { type: string }, avatar_url: { type: [string, 'null'] } } }
+    Stats: { type: object, properties: { total_users: { type: integer }, total_infos: { type: integer }, total_posts: { type: integer }, total_profiles: { type: integer }, pending_review: { type: integer }, open_reports: { type: integer }, oldest_open_report_hours: { type: integer }, dau: { type: integer }, wau: { type: integer }, signups_7d: { type: integer } } }
+
+    # ---- list envelopes ----
+    InfoPostPage: { type: object, properties: { data: { type: array, items: { $ref: '#/components/schemas/InfoPost' } }, meta: { $ref: '#/components/schemas/CursorMeta' } } }
+    AlumniPage: { type: object, properties: { data: { type: array, items: { $ref: '#/components/schemas/AlumniProfile' } }, meta: { $ref: '#/components/schemas/CursorMeta' } } }
+    FacultyPage: { type: object, properties: { data: { type: array, items: { $ref: '#/components/schemas/FacultyMember' } }, meta: { $ref: '#/components/schemas/OffsetMeta' } } }
+    ForumPostPage: { type: object, properties: { data: { type: array, items: { $ref: '#/components/schemas/ForumPost' } }, meta: { $ref: '#/components/schemas/CursorMeta' } } }
+    CommentPage: { type: object, properties: { data: { type: array, items: { $ref: '#/components/schemas/Comment' } }, meta: { $ref: '#/components/schemas/CursorMeta' } } }
+    MessagePage: { type: object, properties: { data: { type: array, items: { $ref: '#/components/schemas/ChatMessage' } }, meta: { $ref: '#/components/schemas/CursorMeta' } } }
+    EventPage: { type: object, properties: { data: { type: array, items: { $ref: '#/components/schemas/CampusEvent' } }, meta: { $ref: '#/components/schemas/OffsetMeta' } } }
+    FavoritePage: { type: object, properties: { data: { type: array, items: { $ref: '#/components/schemas/Favorite' } }, meta: { $ref: '#/components/schemas/CursorMeta' } } }
+    NotificationPage: { type: object, properties: { data: { type: array, items: { $ref: '#/components/schemas/Notification' } }, meta: { $ref: '#/components/schemas/CursorMeta' } } }
+    ReviewPage: { type: object, properties: { data: { type: array, items: { $ref: '#/components/schemas/ReviewQueueItem' } }, meta: { $ref: '#/components/schemas/OffsetMeta' } } }
+    ReportPage: { type: object, properties: { data: { type: array, items: { $ref: '#/components/schemas/Report' } }, meta: { $ref: '#/components/schemas/OffsetMeta' } } }
+    UserPage: { type: object, properties: { data: { type: array, items: { $ref: '#/components/schemas/User' } }, meta: { $ref: '#/components/schemas/OffsetMeta' } } }
+    OperationLogPage: { type: object, properties: { data: { type: array, items: { $ref: '#/components/schemas/OperationLog' } }, meta: { $ref: '#/components/schemas/OffsetMeta' } } }
+

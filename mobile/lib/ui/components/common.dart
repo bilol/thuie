@@ -1,0 +1,21 @@
+// Barrel: shared component library (prefer importing a specific category file).
+library;
+export 'avatar.dart';
+export 'badges.dart';
+export 'buttons.dart';
+export 'dialogs.dart';
+export 'feedback.dart';
+export 'fields.dart';
+export 'haptics.dart';
+export 'lists.dart';
+export 'moderation_history.dart';
+export 'more_actions.dart';
+export 'motion.dart';
+export 'page_shell.dart';
+export 'paged_list.dart';
+export 'refresh.dart';
+export 'sections.dart';
+export 'seal.dart';
+export 'skeleton.dart';
+export 'swipeable_tile.dart';
+export 'tabs.dart';

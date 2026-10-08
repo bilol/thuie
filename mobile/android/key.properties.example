@@ -1,0 +1,14 @@
+# Copy to android/key.properties and fill in your upload-keystore details.
+# key.properties is git-ignored (see android/.gitignore) — never commit the real
+# keystore file or its passwords. `storeFile` may be relative to android/app/
+# (the Gradle module dir) or an absolute path.
+#
+# Generate an upload keystore once:
+#   keytool -genkey -v -keystore android/app/upload-keystore.jks \
+#     -keyalg RSA -keysize 2048 -validity 10000 -alias upload
+#
+# Then build the Play bundle:  flutter build appbundle --release
+storeFile=upload-keystore.jks
+storePassword=YOUR_KEYSTORE_PASSWORD
+keyPassword=YOUR_KEY_PASSWORD
+keyAlias=upload
